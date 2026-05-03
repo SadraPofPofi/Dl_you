@@ -23,15 +23,15 @@
 
 -  دانلودر گیتهابی برای دانلود کردن هر نوع فایلی و منتقل کردن آن به داخل گیتهاب : 
 
-https://github.com/nikzad-avasam/downloader
+🔗 https://github.com/nikzad-avasam/downloader
 
 - دانلودر یوتیوبی به گیتهاب 
 
-https://github.com/nikzad-avasam/youtube-dl
+🔗 https://github.com/nikzad-avasam/youtube-dl
 
 - کانال پیام رسان بله برای آموزش های بیشتر 
 
-https://ble.ir/avasam_edu
+🔗 https://ble.ir/avasam_edu
 
 
 
