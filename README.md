@@ -46,7 +46,7 @@
 
 🔗 https://ble.ir/avasam_edu
 
-- ویدیو آموزش استفاده از این ابزش 
+- ویدیو آموزش استفاده از این ابزار 
 
 🔗 https://avasam.ir/post/youtube-downloader-by-github
 
