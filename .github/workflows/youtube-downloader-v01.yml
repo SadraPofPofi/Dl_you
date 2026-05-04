@@ -73,7 +73,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip ffmpeg zip curl jq
+          sudo apt-get install -y python3-pip ffmpeg zip curl jq bc
           pip3 install --upgrade yt-dlp
 
       - name: Download YouTube Video
@@ -146,6 +146,11 @@ jobs:
           echo "✅ Download complete!"
           ls -la tmp_downloads/
 
+          # Get repository info for raw file links
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          BRANCH="${GITHUB_REF_NAME}"
+
           # Handle file splitting
           FILE_INDEX=0
           for FILE in tmp_downloads/*; do
@@ -176,11 +181,13 @@ jobs:
               zip -0 -s "${SPLIT_MB}m" "${TEMP_NAME}.zip" "${TEMP_NAME}.${EXT}"
 
               # Move and rename all parts to the destination folder with original name
+              PART_FILES=()
               for part in ${TEMP_NAME}.z* ${TEMP_NAME}.zip; do
                 if [ -f "$part" ]; then
                   # Get the extension (z01, z02, zip, etc)
                   PART_EXT="${part##*.}"
                   mv "$part" "../videos/${FILENAME_NO_EXT}/${FILENAME_NO_EXT}.${PART_EXT}"
+                  PART_FILES+=("${FILENAME_NO_EXT}.${PART_EXT}")
                   echo "  📦 Created: ${FILENAME_NO_EXT}.${PART_EXT}"
                 fi
               done
@@ -191,9 +198,130 @@ jobs:
 
               PART_COUNT=$(ls "videos/${FILENAME_NO_EXT}/" 2>/dev/null | wc -l)
               echo "✅ Created $PART_COUNT parts in videos/${FILENAME_NO_EXT}/"
+
+              # Calculate total size of all parts
+              TOTAL_SIZE=0
+              for part_file in "videos/${FILENAME_NO_EXT}"/*; do
+                if [ -f "$part_file" ]; then
+                  PART_SIZE=$(stat -c%s "$part_file")
+                  TOTAL_SIZE=$((TOTAL_SIZE + PART_SIZE))
+                fi
+              done
+              TOTAL_SIZE_MB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024" | bc)
+
+              # Generate download links
+              DOWNLOAD_LINKS=""
+              FOLDER_ENCODED=$(echo "${FILENAME_NO_EXT}" | sed 's/ /%20/g')
+              for part_file in "videos/${FILENAME_NO_EXT}"/*; do
+                if [ -f "$part_file" ]; then
+                  PART_BASENAME=$(basename "$part_file")
+                  PART_ENCODED=$(echo "${PART_BASENAME}" | sed 's/ /%20/g')
+                  RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/videos/${FOLDER_ENCODED}/${PART_ENCODED}"
+                  DOWNLOAD_LINKS="${DOWNLOAD_LINKS}${RAW_LINK}"$'\n'
+                fi
+              done
+
+              # Create info file using printf
+              INFO_FILE="videos/${FILENAME_NO_EXT}/INFO.txt"
+              {
+                printf '%s\n' "╔══════════════════════════════════════════════════════════════════╗"
+                printf '%s\n' "║                    🎬 AVASAM YouTube Downloader                   ║"
+                printf '%s\n' "║                       https://avasam.ir                           ║"
+                printf '%s\n' "╚══════════════════════════════════════════════════════════════════╝"
+                printf '\n'
+                printf '%s\n' "📹 VIDEO INFORMATION"
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '\n'
+                printf '%s\n' "1️⃣  Video Name"
+                printf '%s\n' "    ${FILENAME_NO_EXT}"
+                printf '\n'
+                printf '%s\n' "2️⃣  Original YouTube Link"
+                printf '%s\n' "    ${URL}"
+                printf '\n'
+                printf '%s\n' "3️⃣  Total Downloaded Size"
+                printf '%s\n' "    📦 ${PART_COUNT} zip parts | 💾 Total: ${TOTAL_SIZE_MB} MB"
+                printf '\n'
+                printf '%s\n' "4️⃣  Video Quality"
+                printf '%s\n' "    🎯 ${QUALITY}"
+                printf '\n'
+                printf '%s\n' "5️⃣  Download Links (GitHub Raw)"
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '%s' "${DOWNLOAD_LINKS}"
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '\n'
+                printf '%s\n' "6️⃣  Download Status"
+                printf '%s\n' "    ✅ 100% Downloaded - Complete!"
+                printf '\n'
+                printf '%s\n' "    Progress: [████████████████████] 100%"
+                printf '\n'
+                printf '%s\n' "    ✅ All parts downloaded successfully!"
+                printf '%s\n' "    ✅ Files are ready to use!"
+                printf '\n'
+                printf '%s\n' "    📋 How to extract"
+                printf '%s\n' "    • Download all .zip and .z01, .z02... files"
+                printf '%s\n' "    • Use 7-Zip or WinRAR to extract the .zip file"
+                printf '%s\n' "    • All parts will be combined automatically"
+                printf '\n'
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '%s\n' "                    🏷️ Generated by AVASAM"
+                printf '%s\n' "                      https://avasam.ir"
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+              } > "$INFO_FILE"
+
+              echo "📄 Created INFO.txt in videos/${FILENAME_NO_EXT}/"
+
             else
               cp "$FILE" "videos/$BASENAME"
               echo "✅ Copied as-is (no split needed)"
+
+              # For non-split files, create a simple info file in videos folder
+              SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
+              FILE_ENCODED=$(echo "${BASENAME}" | sed 's/ /%20/g')
+              RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/videos/${FILE_ENCODED}"
+
+              # Create info file for single file using printf
+              INFO_FILE="videos/${FILENAME_NO_EXT}_INFO.txt"
+              {
+                printf '%s\n' "╔══════════════════════════════════════════════════════════════════╗"
+                printf '%s\n' "║                    🎬 AVASAM YouTube Downloader                   ║"
+                printf '%s\n' "║                       https://avasam.ir                           ║"
+                printf '%s\n' "╚══════════════════════════════════════════════════════════════════╝"
+                printf '\n'
+                printf '%s\n' "📹 VIDEO INFORMATION"
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '\n'
+                printf '%s\n' "1️⃣  Video Name"
+                printf '%s\n' "    ${FILENAME_NO_EXT}"
+                printf '\n'
+                printf '%s\n' "2️⃣  Original YouTube Link"
+                printf '%s\n' "    ${URL}"
+                printf '\n'
+                printf '%s\n' "3️⃣  Total Downloaded Size"
+                printf '%s\n' "    📦 1 file (no split needed) | 💾 Total: ${SIZE_MB} MB"
+                printf '\n'
+                printf '%s\n' "4️⃣  Video Quality"
+                printf '%s\n' "    🎯 ${QUALITY}"
+                printf '\n'
+                printf '%s\n' "5️⃣  Download Link (GitHub Raw)"
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '%s\n' "${RAW_LINK}"
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '\n'
+                printf '%s\n' "6️⃣  Download Status"
+                printf '%s\n' "    ✅ 100% Downloaded - Complete!"
+                printf '\n'
+                printf '%s\n' "    Progress: [████████████████████] 100%"
+                printf '\n'
+                printf '%s\n' "    ✅ File downloaded successfully!"
+                printf '%s\n' "    ✅ Ready to use - no extraction needed!"
+                printf '\n'
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+                printf '%s\n' "                    🏷️ Generated by AVASAM"
+                printf '%s\n' "                      https://avasam.ir"
+                printf '%s\n' "═══════════════════════════════════════════════════════════════════"
+              } > "$INFO_FILE"
+
+              echo "📄 Created ${FILENAME_NO_EXT}_INFO.txt"
             fi
           done
           rm -rf tmp_downloads
