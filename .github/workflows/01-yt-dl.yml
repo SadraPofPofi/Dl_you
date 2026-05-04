@@ -1,4 +1,4 @@
-name: 01- 🎬 Youtube Downloader
+name: 01- 🎬 Youtube Downloader - small files
 
 on:
   workflow_dispatch:
