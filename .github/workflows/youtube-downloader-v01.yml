@@ -1,4 +1,4 @@
-name: 01- 🎬 Youtube Downloader 
+name: 01- 🎬 Youtube Downloader
 
 on:
   workflow_dispatch:
@@ -11,11 +11,6 @@ on:
         description: 'Video quality (best, 1080, 720, 480, audio)'
         required: false
         default: 'best'
-        type: string
-      split_threshold_mb:
-        description: 'Split files larger than this MB (0 = never split)'
-        required: false
-        default: '90'
         type: string
 
 jobs:
@@ -85,7 +80,7 @@ jobs:
         run: |
           URL="${{ github.event.inputs.youtube_url }}"
           QUALITY="${{ github.event.inputs.quality }}"
-          SPLIT_MB="${{ github.event.inputs.split_threshold_mb }}"
+          SPLIT_MB=90
           SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
 
           mkdir -p videos tmp_downloads
@@ -152,17 +147,50 @@ jobs:
           ls -la tmp_downloads/
 
           # Handle file splitting
+          FILE_INDEX=0
           for FILE in tmp_downloads/*; do
             [ -f "$FILE" ] || continue
             SIZE=$(stat -c%s "$FILE")
             BASENAME=$(basename "$FILE")
+            # Remove extension for folder name
+            FILENAME_NO_EXT="${BASENAME%.*}"
+            EXT="${BASENAME##*.}"
+            FILE_INDEX=$((FILE_INDEX + 1))
 
             echo "📁 Processing: $BASENAME ($(( SIZE / 1024 / 1024 ))MB)"
 
-            if [ "$SPLIT_BYTES" -gt 0 ] && [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
+            if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
               echo "✂️ Splitting $BASENAME into ${SPLIT_MB}MB parts..."
-              zip -0 -s "${SPLIT_MB}m" "videos/${BASENAME}.zip" -j "$FILE"
-              echo "✅ Created $(ls videos/${BASENAME}.z* 2>/dev/null | wc -l) parts"
+
+              # Create folder for split files using the original filename (without extension)
+              mkdir -p "videos/${FILENAME_NO_EXT}"
+
+              # Use a simple temp name to avoid special character issues with zip -s
+              TEMP_NAME="temparchive${FILE_INDEX}"
+
+              # Copy file to a temp location with simple name
+              cp "$FILE" "tmp_downloads/${TEMP_NAME}.${EXT}"
+
+              # Create split archive in tmp_downloads with simple name
+              cd tmp_downloads
+              zip -0 -s "${SPLIT_MB}m" "${TEMP_NAME}.zip" "${TEMP_NAME}.${EXT}"
+
+              # Move and rename all parts to the destination folder with original name
+              for part in ${TEMP_NAME}.z* ${TEMP_NAME}.zip; do
+                if [ -f "$part" ]; then
+                  # Get the extension (z01, z02, zip, etc)
+                  PART_EXT="${part##*.}"
+                  mv "$part" "../videos/${FILENAME_NO_EXT}/${FILENAME_NO_EXT}.${PART_EXT}"
+                  echo "  📦 Created: ${FILENAME_NO_EXT}.${PART_EXT}"
+                fi
+              done
+
+              # Clean up temp file
+              rm -f "${TEMP_NAME}.${EXT}"
+              cd ..
+
+              PART_COUNT=$(ls "videos/${FILENAME_NO_EXT}/" 2>/dev/null | wc -l)
+              echo "✅ Created $PART_COUNT parts in videos/${FILENAME_NO_EXT}/"
             else
               cp "$FILE" "videos/$BASENAME"
               echo "✅ Copied as-is (no split needed)"
