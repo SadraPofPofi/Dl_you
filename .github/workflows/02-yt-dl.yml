@@ -1,4 +1,7 @@
 name: 02- 💾 Large Youtube Videos Downloader
+# OPTIMIZED VERSION - Supports 4K, faster downloads, reduced wait times
+# Changes: 8x concurrent fragments, 4K support, reduced WARP init time, faster retries
+# See FIXES_SUMMARY.md for detailed improvements
 
 on:
   workflow_dispatch:
@@ -8,7 +11,7 @@ on:
         required: true
         type: string
       quality:
-        description: 'Video quality (best, 1080, 720, 480, audio)'
+        description: 'Video quality (best, 2160, 1440, 1080, 720, 480, audio)'
         required: false
         default: 'best'
         type: string
@@ -61,19 +64,19 @@ jobs:
             -v warp-data:/var/lib/cloudflare-warp \
             caomingjun/warp
 
-          echo "Waiting for WARP to initialize (30 seconds)..."
-          sleep 30
+          echo "Waiting for WARP to initialize (15 seconds)..."
+          sleep 15
 
           echo "Checking WARP status..."
-          for i in {1..10}; do
-            RESULT=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
+          for i in {1..5}; do
+            RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
             if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
               echo "WARP is active!"
               echo "$RESULT"
               break
             else
-              echo "Attempt $i/10 - WARP not ready yet, waiting..."
-              sleep 10
+              echo "Attempt $i/5 - WARP not ready yet, waiting..."
+              sleep 5
             fi
           done
 
@@ -128,6 +131,10 @@ jobs:
           else
             echo "Password protection: DISABLED"
           fi
+          echo ""
+          echo "Checking available formats..."
+          yt-dlp -F "$URL" || echo "Could not list formats (will proceed with download)"
+          echo ""
 
           sanitize_name() {
             echo "$1" | sed 's/ /-/g' | sed 's/　/-/g' | tr -s '-'
@@ -138,30 +145,39 @@ jobs:
           }
 
           # ============================================================
-          # FIXED FORMAT STRINGS – removed [ext=mp4] restrictions
+          # OPTIMIZED FORMAT STRINGS – support for 4K and high quality
           # ============================================================
           case "$QUALITY" in
             "audio")
-              FORMAT="bestaudio"
+              FORMAT="bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio"
               ;;
             "best")
-              FORMAT="bestvideo+bestaudio/best"
+              # Request best quality available (including 4K, 8K)
+              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+              ;;
+            "2160"|"4k")
+              # 4K / 2160p
+              FORMAT="bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]"
+              ;;
+            "1440"|"2k")
+              # 2K / 1440p
+              FORMAT="bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/best[height<=1440]"
               ;;
             "1080")
-              FORMAT="bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+              FORMAT="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]"
               ;;
             "720")
-              FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+              FORMAT="bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]"
               ;;
             "480")
-              FORMAT="bestvideo[height<=480]+bestaudio/best[height<=480]/best"
+              FORMAT="bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]"
               ;;
             *)
-              FORMAT="bestvideo+bestaudio/best"
+              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
               ;;
           esac
 
-          COMMON_FLAGS="--merge-output-format mp4 --output tmp_downloads/%(title)s.%(ext)s --no-part --no-playlist --retries 10 --fragment-retries 10 --no-check-certificates"
+          COMMON_FLAGS="--merge-output-format mp4 --output tmp_downloads/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
 
           # ============================================================
           # FIXED METHOD ORDER – web client (with Deno) is now first
@@ -202,7 +218,6 @@ jobs:
                   $COMMON_FLAGS \
                   --extractor-args "youtube:player_client=android" \
                   --user-agent "Mozilla/5.0 (Linux; Android 12; SM-S906N Build/QP1A.190711.020) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36" \
-                  --concurrent-fragments 4 \
                   "$URL"
                 ;;
               4)
@@ -212,7 +227,6 @@ jobs:
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
                   --extractor-args "youtube:player_client=mweb" \
-                  --concurrent-fragments 4 \
                   "$URL"
                 ;;
               5)
@@ -222,7 +236,6 @@ jobs:
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
                   --extractor-args "youtube:player_client=mweb,android" \
-                  --concurrent-fragments 4 \
                   "$URL"
                 ;;
               6)
@@ -232,7 +245,6 @@ jobs:
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
                   --extractor-args "youtube:player_client=android_vr" \
-                  --concurrent-fragments 4 \
                   "$URL"
                 ;;
               7)
@@ -241,7 +253,6 @@ jobs:
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
                   --extractor-args "youtube:player_client=mweb" \
-                  --concurrent-fragments 4 \
                   "$URL"
                 ;;
               8)
@@ -251,7 +262,6 @@ jobs:
                   --format "bestvideo+bestaudio/best" \
                   $COMMON_FLAGS \
                   --extractor-args "youtube:player_client=mweb,android,android_vr" \
-                  --concurrent-fragments 4 \
                   "$URL"
                 ;;
             esac
@@ -264,8 +274,8 @@ jobs:
               echo "Download successful with method $METHOD!"
               break
             else
-              echo "Method $METHOD failed, waiting before next attempt..."
-              sleep $((RANDOM % 10 + 5))
+              echo "Method $METHOD failed, waiting 3 seconds before next attempt..."
+              sleep 3
             fi
           done
 
@@ -644,7 +654,7 @@ jobs:
           }
 
           push_batch() {
-            local BATCH_SIZE=3
+            local BATCH_SIZE=5
             local FILES=("$@")
             local BATCH_COUNT=0
             local BATCH_FILES=()
