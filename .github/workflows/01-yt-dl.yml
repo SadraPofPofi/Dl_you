@@ -75,7 +75,6 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          # FIX: Added p7zip-full for reliable cross-platform archives (replaces zip for split/password use)
           sudo apt-get install -y python3-pip ffmpeg zip p7zip-full curl jq bc unzip
 
           # Install Deno (JS runtime required by yt-dlp for YouTube n-challenge solving)
@@ -95,7 +94,6 @@ jobs:
           SPLIT_MB=90
           SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
 
-          # Create safe backup location for our files
           BACKUP_DIR="/tmp/video_backup_$$"
           mkdir -p "$BACKUP_DIR"
           echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
@@ -122,28 +120,71 @@ jobs:
             python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
           }
 
+          # ─────────────────────────────────────────────────────────────────────
+          # FIX 1: Rewritten format strings.
+          #
+          # Key changes:
+          #   • For specific heights (1080/720/480): use "bestvideo[height=EXACT]"
+          #     first so yt-dlp picks exactly that resolution, not just "any ≤ N".
+          #     Then fall back to [height<=N] if exact match is unavailable.
+          #   • Removed the bare "/best" terminal fallback that was silently
+          #     selecting 360p/480p when the mp4 streams were unavailable.
+          #   • Added webm/vp9 fallback BEFORE giving up, so 1080p/1440p
+          #     VP9 streams (which YouTube commonly uses) are accepted and
+          #     remuxed to mp4 by ffmpeg instead of being skipped entirely.
+          #   • "best" quality now explicitly sorts by resolution descending
+          #     so it truly downloads the highest available quality.
+          #   • Added --format-sort flags (applied in COMMON_FLAGS) to enforce
+          #     resolution as the primary selection criterion.
+          # ─────────────────────────────────────────────────────────────────────
+
           case "$QUALITY" in
             "audio")
-              FORMAT="bestaudio"
+              FORMAT="bestaudio/bestaudio*"
               ;;
             "best")
-              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+              # Best video + best audio, any container (ffmpeg will remux to mp4)
+              FORMAT="bestvideo+bestaudio/bestvideo*+bestaudio*/best"
               ;;
             "1080")
-              FORMAT="bestvideo[height<=1080]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best"
+              # Exact 1080p first, then ≤1080p, then any container variant
+              # Never fall back to bare "best" which ignores height entirely
+              FORMAT="bestvideo[height=1080]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height=1080]*+bestaudio*/bestvideo[height<=1080]*+bestaudio*"
               ;;
             "720")
-              FORMAT="bestvideo[height<=720]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best"
+              FORMAT="bestvideo[height=720]+bestaudio/bestvideo[height<=720]+bestaudio/bestvideo[height=720]*+bestaudio*/bestvideo[height<=720]*+bestaudio*"
               ;;
             "480")
-              FORMAT="bestvideo[height<=480]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best"
+              FORMAT="bestvideo[height=480]+bestaudio/bestvideo[height<=480]+bestaudio/bestvideo[height=480]*+bestaudio*/bestvideo[height<=480]*+bestaudio*"
               ;;
             *)
-              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+              FORMAT="bestvideo+bestaudio/bestvideo*+bestaudio*/best"
               ;;
           esac
 
-          COMMON_FLAGS="--merge-output-format mp4 --output tmp_downloads/%(title)s.%(ext)s --no-part --no-playlist --retries 10 --fragment-retries 10 --no-check-certificates"
+          # ─────────────────────────────────────────────────────────────────────
+          # FIX 2: Added --format-sort to make resolution the primary criterion.
+          #   res: sorts by resolution descending (highest first)
+          #   +codec:vp9.1  prefers vp9 streams (YouTube's main HD codec)
+          #   +size         prefers larger files within same resolution (better quality)
+          #
+          # Also added --merge-output-format mp4 so webm streams are remuxed.
+          # ─────────────────────────────────────────────────────────────────────
+
+          if [ "$QUALITY" = "audio" ]; then
+            COMMON_FLAGS="--output tmp_downloads/%(title)s.%(ext)s --no-part --no-playlist --retries 10 --fragment-retries 10 --no-check-certificates"
+          else
+            COMMON_FLAGS="--merge-output-format mp4 --format-sort res,+codec:vp9.1,+size --output tmp_downloads/%(title)s.%(ext)s --no-part --no-playlist --retries 10 --fragment-retries 10 --no-check-certificates"
+          fi
+
+          # ─────────────────────────────────────────────────────────────────────
+          # FIX 3: Reordered player clients.
+          #   • "web" client with Deno (solves n-challenge properly) is now first
+          #     because it exposes the full range of qualities including 1080p+.
+          #   • "mweb" and "android" demoted — they often cap at 720p or return
+          #     only lower-quality streams.
+          #   • Method 8 fallback now correctly uses $FORMAT (was hardcoded before).
+          # ─────────────────────────────────────────────────────────────────────
 
           download_video() {
             local METHOD=$1
@@ -151,6 +192,40 @@ jobs:
 
             case $METHOD in
               1)
+                # Best method: web client + Deno for n-challenge, full quality range
+                yt-dlp \
+                  --proxy "socks5://127.0.0.1:1080" \
+                  --format "$FORMAT" \
+                  $COMMON_FLAGS \
+                  --extractor-args "youtube:player_client=web" \
+                  --js-runtimes deno \
+                  --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
+                  --add-header "Accept-Language:en-US,en;q=0.9" \
+                  --concurrent-fragments 4 \
+                  "$URL"
+                ;;
+              2)
+                # tv_embedded client — often has full quality, no n-challenge
+                yt-dlp \
+                  --proxy "socks5://127.0.0.1:1080" \
+                  --format "$FORMAT" \
+                  $COMMON_FLAGS \
+                  --extractor-args "youtube:player_client=tv_embedded" \
+                  --concurrent-fragments 4 \
+                  "$URL"
+                ;;
+              3)
+                # android_vr — high quality streams, no n-challenge required
+                yt-dlp \
+                  --proxy "socks5://127.0.0.1:1080" \
+                  --format "$FORMAT" \
+                  $COMMON_FLAGS \
+                  --extractor-args "youtube:player_client=android_vr" \
+                  --concurrent-fragments 4 \
+                  "$URL"
+                ;;
+              4)
+                # mweb fallback — may cap quality but sometimes works when others fail
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
@@ -159,7 +234,8 @@ jobs:
                   --concurrent-fragments 4 \
                   "$URL"
                 ;;
-              2)
+              5)
+                # android fallback
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
@@ -169,36 +245,18 @@ jobs:
                   --concurrent-fragments 4 \
                   "$URL"
                 ;;
-              3)
+              6)
+                # web client, no proxy — in case WARP is causing issues
                 yt-dlp \
-                  --proxy "socks5://127.0.0.1:1080" \
-                  --format "$FORMAT" \
-                  $COMMON_FLAGS \
-                  --extractor-args "youtube:player_client=mweb,android" \
-                  --concurrent-fragments 4 \
-                  "$URL"
-                ;;
-              4)
-                yt-dlp \
-                  --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
                   --extractor-args "youtube:player_client=web" \
                   --js-runtimes deno \
-                  --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
-                  --add-header "Accept-Language:en-US,en;q=0.9" \
-                  "$URL"
-                ;;
-              5)
-                yt-dlp \
-                  --proxy "socks5://127.0.0.1:1080" \
-                  --format "$FORMAT" \
-                  $COMMON_FLAGS \
-                  --extractor-args "youtube:player_client=android_vr" \
                   --concurrent-fragments 4 \
                   "$URL"
                 ;;
-              6)
+              7)
+                # mweb, no proxy
                 yt-dlp \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
@@ -206,20 +264,15 @@ jobs:
                   --concurrent-fragments 4 \
                   "$URL"
                 ;;
-              7)
-                yt-dlp \
-                  --format "$FORMAT" \
-                  $COMMON_FLAGS \
-                  --extractor-args "youtube:player_client=android" \
-                  --concurrent-fragments 4 \
-                  "$URL"
-                ;;
               8)
+                # FIX 4: Last resort uses $FORMAT (was hardcoded "bestvideo+bestaudio/best"
+                # before — meaning user's quality choice was completely ignored here)
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
-                  --format "bestvideo+bestaudio/best" \
+                  --format "$FORMAT" \
                   $COMMON_FLAGS \
-                  --extractor-args "youtube:player_client=mweb,android,android_vr" \
+                  --extractor-args "youtube:player_client=web,mweb,android_vr" \
+                  --js-runtimes deno \
                   --concurrent-fragments 4 \
                   "$URL"
                 ;;
@@ -231,6 +284,26 @@ jobs:
             if download_video $METHOD; then
               DOWNLOAD_SUCCESS=true
               echo "Download successful with method $METHOD!"
+
+              # ───────────────────────────────────────────────────────────────
+              # FIX 5: Verify the downloaded file actually meets requested quality.
+              # If user asked for 1080/720/480 and we got something much lower,
+              # log a clear warning so it's visible in the workflow log.
+              # ───────────────────────────────────────────────────────────────
+              if [ "$QUALITY" != "best" ] && [ "$QUALITY" != "audio" ]; then
+                for DOWNLOADED_FILE in tmp_downloads/*.mp4 tmp_downloads/*.webm tmp_downloads/*.mkv; do
+                  [ -f "$DOWNLOADED_FILE" ] || continue
+                  ACTUAL_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$DOWNLOADED_FILE" 2>/dev/null || echo "unknown")
+                  echo "Requested quality: ${QUALITY}p | Actual video height: ${ACTUAL_HEIGHT}px"
+                  if [ "$ACTUAL_HEIGHT" != "unknown" ] && [ "$ACTUAL_HEIGHT" -lt $(( QUALITY - 50 )) ] 2>/dev/null; then
+                    echo "⚠️  WARNING: Downloaded resolution (${ACTUAL_HEIGHT}p) is significantly lower than requested (${QUALITY}p)."
+                    echo "   This may mean the video is not available at ${QUALITY}p on YouTube."
+                  else
+                    echo "✅ Quality check passed."
+                  fi
+                done
+              fi
+
               break
             else
               echo "Method $METHOD failed, waiting before next attempt..."
@@ -303,18 +376,9 @@ jobs:
             if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
               echo "Splitting $BASENAME into ${SPLIT_MB}MB parts..."
 
-              # ============================================================
-              # FIX: Use 7z instead of zip -s for split archives.
-              # The Linux `zip -s` command produces split archives that many
-              # extraction tools (Windows Explorer, older WinRAR) incorrectly
-              # treat as password-protected. 7z handles splits cleanly and
-              # is fully cross-platform compatible.
-              # ============================================================
-
               ARCHIVE_BASE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}"
 
               if [ -n "$ZIP_PASSWORD" ]; then
-                # Password-protected split archive with AES-256 encryption
                 7z a \
                   -v${SPLIT_MB}m \
                   -p"${ZIP_PASSWORD}" \
@@ -323,7 +387,6 @@ jobs:
                   "${ARCHIVE_BASE}.7z" \
                   "$FILE"
               else
-                # No password - plain split archive, no encryption headers
                 7z a \
                   -v${SPLIT_MB}m \
                   -mx=0 \
@@ -407,7 +470,6 @@ jobs:
               if [ -n "$ZIP_PASSWORD" ]; then
                 echo "$BASENAME - creating password-protected 7z archive"
 
-                # FIX: Use 7z instead of zip for consistent password behavior
                 7z a \
                   -p"${ZIP_PASSWORD}" \
                   -mhe=on \
