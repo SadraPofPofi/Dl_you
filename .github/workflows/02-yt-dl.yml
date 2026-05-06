@@ -382,22 +382,24 @@ jobs:
               ARCHIVE_BASE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}"
 
               if [ -n "$ZIP_PASSWORD" ]; then
+                # Password-protected: use 7z with standard zip extension naming
+                # 7z creates: file.zip, file.z01, file.z02, ... (WinRAR/7-Zip compatible)
                 7z a \
+                  -tzip \
                   -v${SPLIT_MB}m \
                   -p"${ZIP_PASSWORD}" \
-                  -mhe=on \
                   -mx=0 \
-                  "${ARCHIVE_BASE}.7z" \
+                  "${ARCHIVE_BASE}.zip" \
                   "$FILE"
               else
-                7z a \
-                  -v${SPLIT_MB}m \
-                  -mx=0 \
-                  "${ARCHIVE_BASE}.7z" \
-                  "$FILE"
+                # No password: use zip's native split — creates file.zip + file.z01, file.z02, ...
+                # Users just double-click file.zip — WinRAR, 7-Zip, Ark all handle it natively
+                SPLIT_BYTES_ZIP=$(( SPLIT_MB * 1024 * 1024 ))
+                zip -0 -s ${SPLIT_MB}m "${ARCHIVE_BASE}.zip" "$FILE"
               fi
 
-              PART_COUNT=$(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.7z* 2>/dev/null | wc -l)
+              # Collect all split parts (file.zip, file.z01, file.z02, ...)
+              PART_COUNT=$(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.zip "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.z[0-9]* 2>/dev/null | wc -l)
               echo "Created $PART_COUNT parts"
 
               TOTAL_SIZE=0
@@ -411,7 +413,8 @@ jobs:
 
               DOWNLOAD_LINKS_MD=""
               LINK_NUM=0
-              for part_file in $(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.7z* 2>/dev/null | sort); do
+              # Sort: .zip first, then .z01, .z02, ...
+              for part_file in $(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.zip "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.z[0-9]* 2>/dev/null | sort -V); do
                 if [ -f "$part_file" ]; then
                   PART_BASENAME=$(basename "$part_file")
                   PART_ENCODED=$(urlencode "${PART_BASENAME}")
@@ -420,6 +423,9 @@ jobs:
                   DOWNLOAD_LINKS_MD="${DOWNLOAD_LINKS_MD}| ${LINK_NUM} | \`${PART_BASENAME}\` | [Download](${RAW_LINK}) |"$'\n'
                 fi
               done
+
+              # Determine main zip filename for instructions
+              MAIN_ZIP="${FINAL_FOLDER_NAME}.zip"
 
               README_FILE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
               {
@@ -446,6 +452,8 @@ jobs:
                 printf '%s\n' ""
                 printf '%s\n' "## Download Links"
                 printf '%s\n' ""
+                printf '%s\n' "> ⬇️ Download **all parts**, then open \`${MAIN_ZIP}\` — the other parts are found automatically."
+                printf '%s\n' ""
                 printf '%s\n' "| # | File | Link |"
                 printf '%s\n' "|---|------|------|"
                 printf '%s' "${DOWNLOAD_LINKS_MD}"
@@ -454,12 +462,22 @@ jobs:
                 printf '%s\n' ""
                 printf '%s\n' "## How to Extract"
                 printf '%s\n' ""
-                printf '%s\n' "1. **Download** all parts (e.g. \`.7z.001\`, \`.7z.002\`...)"
-                printf '%s\n' "2. **Install** [7-Zip](https://www.7-zip.org/) (Windows/Linux) or [Keka](https://www.keka.io/) (Mac)"
-                printf '%s\n' "3. **Right-click** the \`.7z.001\` file → Extract Here"
-                printf '%s\n' "4. All parts combine automatically into the original video"
+                printf '%s\n' "Download all parts into the **same folder**, then:"
+                printf '%s\n' ""
                 if [ -n "$ZIP_PASSWORD" ]; then
-                  printf '%s\n' "5. Enter the password when prompted"
+                  printf '%s\n' "| OS | Steps |"
+                  printf '%s\n' "|----|-------|"
+                  printf '%s\n' "| **Windows** | Right-click \`${MAIN_ZIP}\` → *Extract Here* (needs [7-Zip](https://www.7-zip.org/) or WinRAR) → enter password |"
+                  printf '%s\n' "| **Mac** | Open with [Keka](https://www.keka.io/) → enter password |"
+                  printf '%s\n' "| **Linux** | \`unzip ${MAIN_ZIP}\` or right-click → Extract → enter password |"
+                  printf '%s\n' "| **Android** | Use [ZArchiver](https://play.google.com/store/apps/details?id=ru.zdevs.zarchiver) → tap \`${MAIN_ZIP}\` → enter password |"
+                else
+                  printf '%s\n' "| OS | Steps |"
+                  printf '%s\n' "|----|-------|"
+                  printf '%s\n' "| **Windows** | Double-click \`${MAIN_ZIP}\` — opens in Explorer, WinRAR, or 7-Zip automatically |"
+                  printf '%s\n' "| **Mac** | Double-click \`${MAIN_ZIP}\` — extracts with Archive Utility or The Unarchiver |"
+                  printf '%s\n' "| **Linux** | \`unzip ${MAIN_ZIP}\` or right-click → Extract Here (Ark/File Manager) |"
+                  printf '%s\n' "| **Android** | Tap \`${MAIN_ZIP}\` in your file manager — or use [ZArchiver](https://play.google.com/store/apps/details?id=ru.zdevs.zarchiver) |"
                 fi
                 printf '%s\n' ""
                 printf '%s\n' "---"
@@ -471,17 +489,14 @@ jobs:
 
             else
               if [ -n "$ZIP_PASSWORD" ]; then
-                echo "$BASENAME - creating password-protected 7z archive"
+                echo "$BASENAME - creating password-protected zip archive"
 
-                7z a \
-                  -p"${ZIP_PASSWORD}" \
-                  -mhe=on \
-                  -mx=0 \
-                  "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.7z" \
+                zip -0 -P "${ZIP_PASSWORD}" \
+                  "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.zip" \
                   "$FILE"
 
                 SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
-                FILE_ENCODED=$(urlencode "${FINAL_FOLDER_NAME}.7z")
+                FILE_ENCODED=$(urlencode "${FINAL_FOLDER_NAME}.zip")
                 RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/videos/${FOLDER_ENCODED}/${FILE_ENCODED}"
 
                 README_FILE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
@@ -507,22 +522,25 @@ jobs:
                   printf '%s\n' ""
                   printf '%s\n' "| # | File | Link |"
                   printf '%s\n' "|---|------|------|"
-                  printf '%s\n' "| 1 | \`${FINAL_FOLDER_NAME}.7z\` | [Download](${RAW_LINK}) |"
+                  printf '%s\n' "| 1 | \`${FINAL_FOLDER_NAME}.zip\` | [Download](${RAW_LINK}) |"
                   printf '%s\n' ""
                   printf '%s\n' "---"
                   printf '%s\n' ""
                   printf '%s\n' "## How to Extract"
                   printf '%s\n' ""
-                  printf '%s\n' "1. **Install** [7-Zip](https://www.7-zip.org/) (Windows/Linux) or [Keka](https://www.keka.io/) (Mac)"
-                  printf '%s\n' "2. **Right-click** the \`.7z\` file → Extract Here"
-                  printf '%s\n' "3. Enter the password when prompted"
+                  printf '%s\n' "| OS | Steps |"
+                  printf '%s\n' "|----|-------|"
+                  printf '%s\n' "| **Windows** | Double-click \`${FINAL_FOLDER_NAME}.zip\` → enter password |"
+                  printf '%s\n' "| **Mac** | Double-click → enter password (or use [The Unarchiver](https://theunarchiver.com/)) |"
+                  printf '%s\n' "| **Linux** | \`unzip ${FINAL_FOLDER_NAME}.zip\` → enter password |"
+                  printf '%s\n' "| **Android** | Tap the file in your file manager → enter password |"
                   printf '%s\n' ""
                   printf '%s\n' "---"
                   printf '%s\n' ""
                   printf '%s\n' "*This tool created by [avasam.ir](https://avasam.ir)*"
                 } > "$README_FILE"
 
-                echo "Created password-protected 7z archive and README.md"
+                echo "Created password-protected zip archive and README.md"
 
               else
                 echo "$BASENAME - copying mp4 directly (no archive needed)"
@@ -560,7 +578,7 @@ jobs:
                   printf '%s\n' ""
                   printf '%s\n' "---"
                   printf '%s\n' ""
-                  printf '%s\n' "Ready to use - no extraction needed!"
+                  printf '%s\n' "Ready to use — no extraction needed!"
                   printf '%s\n' ""
                   printf '%s\n' "---"
                   printf '%s\n' ""
@@ -819,7 +837,7 @@ jobs:
 
           while IFS= read -r -d '' FILE; do
             ALL_FILES+=("$FILE")
-          done < <(find videos -type f \( -name "*.7z" -o -name "*.7z.[0-9]*" -o -name "*.mp4" -o -name "*.mp3" -o -name "*.m4a" \) -print0 2>/dev/null | sort -z)
+          done < <(find videos -type f \( -name "*.zip" -o -name "*.z[0-9]*" -o -name "*.mp4" -o -name "*.mp3" -o -name "*.m4a" \) -print0 2>/dev/null | sort -z)
 
           TOTAL_FILES=${#ALL_FILES[@]}
           echo "Found $TOTAL_FILES files to push"
