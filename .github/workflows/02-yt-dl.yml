@@ -34,7 +34,6 @@ jobs:
 
       - name: Configure Git for Large Files
         run: |
-          # Configure git for better large file handling
           git config --global http.postBuffer 524288000
           git config --global http.maxRequestBuffer 100M
           git config --global core.compression 0
@@ -89,7 +88,8 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip ffmpeg zip curl jq bc unzip
+          # FIX: Added p7zip-full for reliable cross-platform split archives
+          sudo apt-get install -y python3-pip ffmpeg zip p7zip-full curl jq bc unzip
 
           # Install Deno (JS runtime required by yt-dlp for YouTube n-challenge solving)
           curl -fsSL https://deno.land/install.sh | sh
@@ -130,12 +130,10 @@ jobs:
             echo "Password protection: DISABLED"
           fi
 
-          # FIX: sanitize name - replace spaces and special chars with dashes
           sanitize_name() {
             echo "$1" | sed 's/ /-/g' | sed 's/　/-/g' | tr -s '-'
           }
 
-          # Function for proper URL encoding
           urlencode() {
             python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
           }
@@ -161,17 +159,14 @@ jobs:
               ;;
           esac
 
-          # Common yt-dlp flags shared across methods
           COMMON_FLAGS="--merge-output-format mp4 --output tmp_downloads/%(title)s.%(ext)s --no-part --no-playlist --retries 10 --fragment-retries 10 --no-check-certificates"
 
-          # Array of different methods to try
           download_video() {
             local METHOD=$1
             echo "Trying download method $METHOD..."
 
             case $METHOD in
               1)
-                # mweb client - does NOT require PO token, very reliable
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
@@ -181,7 +176,6 @@ jobs:
                   "$URL"
                 ;;
               2)
-                # android client via WARP - widely supported, no JS runtime needed
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
@@ -192,7 +186,6 @@ jobs:
                   "$URL"
                 ;;
               3)
-                # mweb + android combo fallback (tries both clients, picks best format)
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
@@ -202,7 +195,6 @@ jobs:
                   "$URL"
                 ;;
               4)
-                # web client with deno JS runtime for n-challenge solving
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
@@ -214,7 +206,6 @@ jobs:
                   "$URL"
                 ;;
               5)
-                # android_vr client - bypasses most bot checks, no PO token needed
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
@@ -224,7 +215,6 @@ jobs:
                   "$URL"
                 ;;
               6)
-                # mweb without proxy as direct fallback
                 yt-dlp \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
@@ -233,7 +223,6 @@ jobs:
                   "$URL"
                 ;;
               7)
-                # android without proxy as direct fallback
                 yt-dlp \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
@@ -242,7 +231,6 @@ jobs:
                   "$URL"
                 ;;
               8)
-                # Last resort: broadest format fallback, no strict ext requirements
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "bestvideo+bestaudio/best" \
@@ -271,7 +259,6 @@ jobs:
             exit 1
           fi
 
-          # FIX: Remove any leftover .part files from failed attempts
           find tmp_downloads -name "*.part" -delete
 
           echo "Download complete!"
@@ -291,9 +278,7 @@ jobs:
           get_unique_folder() {
             local BASE_PATH="$1"
             local NAME="$2"
-            local CHECK_BACKUP="$3"
 
-            # Check both in videos and backup dir
             if [ ! -d "$BASE_PATH/$NAME" ] && [ ! -d "$BACKUP_DIR/$NAME" ]; then
               echo "$NAME"
               return
@@ -305,7 +290,6 @@ jobs:
             echo "${NAME}_${RANDOM_SUFFIX}"
           }
 
-          # Create file to store video info
           > /tmp/video_info.txt
 
           FILE_INDEX=0
@@ -317,19 +301,16 @@ jobs:
             EXT="${BASENAME##*.}"
             FILE_INDEX=$((FILE_INDEX + 1))
 
-            # FIX: sanitize name - replace spaces with dashes
             FILENAME_NO_EXT=$(sanitize_name "$FILENAME_NO_EXT")
 
             echo "Processing: $BASENAME ($(( SIZE / 1024 / 1024 ))MB)"
             echo "Sanitized name: $FILENAME_NO_EXT"
 
-            FINAL_FOLDER_NAME=$(get_unique_folder "videos" "$FILENAME_NO_EXT" "true")
+            FINAL_FOLDER_NAME=$(get_unique_folder "videos" "$FILENAME_NO_EXT")
 
-            # Create folder in BACKUP location (safe from git operations)
             mkdir -p "$BACKUP_DIR/${FINAL_FOLDER_NAME}"
             echo "Created backup folder: $BACKUP_DIR/${FINAL_FOLDER_NAME}"
 
-            # Save info for master README update
             echo "${FILENAME_NO_EXT}|${FINAL_FOLDER_NAME}" >> /tmp/video_info.txt
 
             TEMP_NAME="video_${FILE_INDEX}"
@@ -338,27 +319,35 @@ jobs:
             if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
               echo "Splitting $BASENAME into ${SPLIT_MB}MB parts..."
 
-              cp "$FILE" "tmp_downloads/${TEMP_NAME}.${EXT}"
+              # ============================================================
+              # FIX: Use 7z instead of zip -s for split archives.
+              # The Linux `zip -s` command produces split archives that many
+              # extraction tools (Windows Explorer, older WinRAR) incorrectly
+              # treat as password-protected. 7z handles splits cleanly and
+              # is fully cross-platform compatible.
+              # ============================================================
 
-              cd tmp_downloads
+              ARCHIVE_BASE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}"
+
               if [ -n "$ZIP_PASSWORD" ]; then
-                zip -0 -s "${SPLIT_MB}m" -P "$ZIP_PASSWORD" "${TEMP_NAME}.zip" "${TEMP_NAME}.${EXT}"
+                # Password-protected split archive with AES-256 encryption
+                7z a \
+                  -v${SPLIT_MB}m \
+                  -p"${ZIP_PASSWORD}" \
+                  -mhe=on \
+                  -mx=0 \
+                  "${ARCHIVE_BASE}.7z" \
+                  "$FILE"
               else
-                zip -0 -s "${SPLIT_MB}m" "${TEMP_NAME}.zip" "${TEMP_NAME}.${EXT}"
+                # No password - plain split archive, no encryption headers
+                7z a \
+                  -v${SPLIT_MB}m \
+                  -mx=0 \
+                  "${ARCHIVE_BASE}.7z" \
+                  "$FILE"
               fi
 
-              for part in ${TEMP_NAME}.z[0-9]* ${TEMP_NAME}.zip; do
-                if [ -f "$part" ]; then
-                  PART_EXT="${part##*.}"
-                  mv "$part" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.${PART_EXT}"
-                  echo "  Created: ${FINAL_FOLDER_NAME}.${PART_EXT}"
-                fi
-              done
-
-              rm -f "${TEMP_NAME}.${EXT}"
-              cd ..
-
-              PART_COUNT=$(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.z* 2>/dev/null | wc -l)
+              PART_COUNT=$(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.7z* 2>/dev/null | wc -l)
               echo "Created $PART_COUNT parts"
 
               TOTAL_SIZE=0
@@ -372,7 +361,7 @@ jobs:
 
               DOWNLOAD_LINKS_MD=""
               LINK_NUM=0
-              for part_file in "$BACKUP_DIR/${FINAL_FOLDER_NAME}"/*.z*; do
+              for part_file in $(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.7z* 2>/dev/null | sort); do
                 if [ -f "$part_file" ]; then
                   PART_BASENAME=$(basename "$part_file")
                   PART_ENCODED=$(urlencode "${PART_BASENAME}")
@@ -394,7 +383,7 @@ jobs:
                 printf '%s\n' "|----------|-------|"
                 printf '%s\n' "| **Video Name** | \`${FILENAME_NO_EXT}\` |"
                 printf '%s\n' "| **Original Link** | [YouTube Video](${URL}) |"
-                printf '%s\n' "| **Total Size** | **${PART_COUNT} zip parts** - **${TOTAL_SIZE_MB} MB** |"
+                printf '%s\n' "| **Total Size** | **${PART_COUNT} parts** - **${TOTAL_SIZE_MB} MB** |"
                 printf '%s\n' "| **Quality** | **${QUALITY}** |"
                 printf '%s\n' "| **Status** | **Complete (100%)** |"
                 if [ -n "$ZIP_PASSWORD" ]; then
@@ -415,9 +404,13 @@ jobs:
                 printf '%s\n' ""
                 printf '%s\n' "## How to Extract"
                 printf '%s\n' ""
-                printf '%s\n' "1. **Download** all \`.zip\` and \`.z01\`, \`.z02\`... files"
-                printf '%s\n' "2. **Extract** using [7-Zip](https://www.7-zip.org/) or [WinRAR](https://www.rarlab.com/)"
-                printf '%s\n' "3. Open the \`.zip\` file - all parts will combine automatically"
+                printf '%s\n' "1. **Download** all parts (e.g. \`.7z.001\`, \`.7z.002\`...)"
+                printf '%s\n' "2. **Install** [7-Zip](https://www.7-zip.org/) (Windows/Linux) or [Keka](https://www.keka.io/) (Mac)"
+                printf '%s\n' "3. **Right-click** the \`.7z.001\` file → Extract Here"
+                printf '%s\n' "4. All parts combine automatically into the original video"
+                if [ -n "$ZIP_PASSWORD" ]; then
+                  printf '%s\n' "5. Enter the password when prompted"
+                fi
                 printf '%s\n' ""
                 printf '%s\n' "---"
                 printf '%s\n' ""
@@ -427,19 +420,20 @@ jobs:
               echo "Created README.md"
 
             else
+              # File is small enough to not need splitting
               if [ -n "$ZIP_PASSWORD" ]; then
-                echo "$BASENAME - creating password-protected zip"
+                echo "$BASENAME - creating password-protected 7z archive"
 
-                cp "$FILE" "tmp_downloads/${TEMP_NAME}.${EXT}"
-
-                cd tmp_downloads
-                zip -j -P "$ZIP_PASSWORD" "${TEMP_NAME}.zip" "${TEMP_NAME}.${EXT}"
-                mv "${TEMP_NAME}.zip" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.zip"
-                rm -f "${TEMP_NAME}.${EXT}"
-                cd ..
+                # FIX: Use 7z instead of zip for consistent password behavior
+                7z a \
+                  -p"${ZIP_PASSWORD}" \
+                  -mhe=on \
+                  -mx=0 \
+                  "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.7z" \
+                  "$FILE"
 
                 SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
-                FILE_ENCODED=$(urlencode "${FINAL_FOLDER_NAME}.zip")
+                FILE_ENCODED=$(urlencode "${FINAL_FOLDER_NAME}.7z")
                 RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/videos/${FOLDER_ENCODED}/${FILE_ENCODED}"
 
                 README_FILE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
@@ -454,7 +448,7 @@ jobs:
                   printf '%s\n' "|----------|-------|"
                   printf '%s\n' "| **Video Name** | \`${FILENAME_NO_EXT}\` |"
                   printf '%s\n' "| **Original Link** | [YouTube Video](${URL}) |"
-                  printf '%s\n' "| **Total Size** | **1 zip file** - **${SIZE_MB} MB** |"
+                  printf '%s\n' "| **Total Size** | **1 archive** - **${SIZE_MB} MB** |"
                   printf '%s\n' "| **Quality** | **${QUALITY}** |"
                   printf '%s\n' "| **Status** | **Complete (100%)** |"
                   printf '%s\n' "| **Password Protected** | **YES** |"
@@ -465,17 +459,25 @@ jobs:
                   printf '%s\n' ""
                   printf '%s\n' "| # | File | Link |"
                   printf '%s\n' "|---|------|------|"
-                  printf '%s\n' "| 1 | \`${FINAL_FOLDER_NAME}.zip\` | [Download](${RAW_LINK}) |"
+                  printf '%s\n' "| 1 | \`${FINAL_FOLDER_NAME}.7z\` | [Download](${RAW_LINK}) |"
+                  printf '%s\n' ""
+                  printf '%s\n' "---"
+                  printf '%s\n' ""
+                  printf '%s\n' "## How to Extract"
+                  printf '%s\n' ""
+                  printf '%s\n' "1. **Install** [7-Zip](https://www.7-zip.org/) (Windows/Linux) or [Keka](https://www.keka.io/) (Mac)"
+                  printf '%s\n' "2. **Right-click** the \`.7z\` file → Extract Here"
+                  printf '%s\n' "3. Enter the password when prompted"
                   printf '%s\n' ""
                   printf '%s\n' "---"
                   printf '%s\n' ""
                   printf '%s\n' "*This tool created by [avasam.ir](https://avasam.ir)*"
                 } > "$README_FILE"
 
-                echo "Created password-protected zip and README.md"
+                echo "Created password-protected 7z archive and README.md"
 
               else
-                echo "$BASENAME - copying mp4"
+                echo "$BASENAME - copying mp4 directly (no archive needed)"
 
                 cp "$FILE" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.${EXT}"
 
@@ -524,7 +526,6 @@ jobs:
 
           rm -rf tmp_downloads
 
-          # Debug: Show backup contents
           echo ""
           echo "===== Backup folder contents ====="
           find "$BACKUP_DIR" -type f | head -50
@@ -547,11 +548,9 @@ jobs:
           echo "This method pushes files ONE AT A TIME to avoid timeout issues"
           echo ""
 
-          # Get backup directory path
           BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
           echo "Backup directory: $BACKUP_DIR"
 
-          # Check backup has files
           BACKUP_FILE_COUNT=$(find "$BACKUP_DIR" -type f 2>/dev/null | wc -l)
           echo "Total files to push: $BACKUP_FILE_COUNT"
 
@@ -560,18 +559,15 @@ jobs:
             exit 1
           fi
 
-          # Function for URL encoding
           urlencode() {
             python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
           }
 
-          # Function to regenerate master README from all folders
           regenerate_master_readme() {
             MASTER_README="videos/README.md"
 
             echo "Regenerating master README..."
 
-            # Start fresh README
             {
               echo "# DOWNLOADED VIDEOS LIST :"
               echo ""
@@ -579,18 +575,13 @@ jobs:
               echo ""
             } > "$MASTER_README"
 
-            # Video emojis
             VIDEO_EMOJIS=("🎬" "🎥" "📽️" "🎞️" "📺" "🎦" "🎭" "🎪" "🎯" "🎮" "🎵" "🎶" "🎸" "🎹" "🎤")
 
-            # Counter for numbering
             NUM=0
 
-            # Add all existing video folders
             for folder in videos/*/; do
               [ -d "$folder" ] || continue
               FOLDER_NAME=$(basename "$folder")
-
-              # Skip if it's not a video folder (check for README.md inside)
               [ -f "$folder/README.md" ] || continue
 
               NUM=$((NUM + 1))
@@ -604,7 +595,6 @@ jobs:
             echo "Master README regenerated with $NUM videos"
           }
 
-          # Function to push a single file with retries
           push_single_file() {
             local FILE_PATH="$1"
             local MAX_RETRIES=5
@@ -613,10 +603,8 @@ jobs:
             while [ $RETRY -lt $MAX_RETRIES ]; do
               RETRY=$((RETRY + 1))
 
-              # Fetch latest
               git fetch origin "$BRANCH" --quiet 2>/dev/null || true
 
-              # Check if we need to rebase
               LOCAL_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "none")
               REMOTE_HEAD=$(git rev-parse origin/"$BRANCH" 2>/dev/null || echo "none")
 
@@ -624,25 +612,20 @@ jobs:
                 echo "    Syncing with remote..."
                 git reset --hard origin/"$BRANCH" 2>/dev/null || true
 
-                # Re-copy all backup files to ensure they exist
                 mkdir -p videos
                 cp -r "$BACKUP_DIR"/* videos/ 2>/dev/null || true
               fi
 
-              # Stage the specific file
               git add "$FILE_PATH" 2>/dev/null || true
 
-              # Check if there's anything to commit
               if git diff --cached --quiet 2>/dev/null; then
                 echo "    File already exists or no changes"
                 return 0
               fi
 
-              # Commit
               FILENAME=$(basename "$FILE_PATH")
               git commit -m "[AVASAM] Add: $FILENAME [skip ci]" --quiet 2>/dev/null || true
 
-              # Push with timeout
               echo "    Push attempt $RETRY/$MAX_RETRIES..."
               if timeout 120 git push origin HEAD:"$BRANCH" 2>&1; then
                 echo "    SUCCESS!"
@@ -657,9 +640,8 @@ jobs:
             return 1
           }
 
-          # Function to push files in small batches
           push_batch() {
-            local BATCH_SIZE=3  # Push 3 files at a time (about 135MB with 45MB splits)
+            local BATCH_SIZE=3
             local FILES=("$@")
             local BATCH_COUNT=0
             local BATCH_FILES=()
@@ -675,24 +657,19 @@ jobs:
                 echo ""
                 echo ">>> Pushing batch ($TOTAL_PUSHED/$TOTAL_FILES files)..."
 
-                # Fetch and reset to latest
                 git fetch origin "$BRANCH" --quiet 2>/dev/null || true
                 git reset --hard origin/"$BRANCH" 2>/dev/null || true
 
-                # Re-copy all backup files
                 mkdir -p videos
                 cp -r "$BACKUP_DIR"/* videos/ 2>/dev/null || true
 
-                # Add batch files
                 for BF in "${BATCH_FILES[@]}"; do
                   git add "$BF" 2>/dev/null || true
                 done
 
-                # Commit batch
                 if ! git diff --cached --quiet 2>/dev/null; then
                   git commit -m "[AVASAM] Add batch of $BATCH_COUNT files [skip ci]" --quiet 2>/dev/null || true
 
-                  # Push with retries
                   local PUSH_RETRY=0
                   local PUSH_SUCCESS=false
                   while [ $PUSH_RETRY -lt 5 ]; do
@@ -731,7 +708,6 @@ jobs:
               fi
             done
 
-            # Push remaining files
             if [ ${#BATCH_FILES[@]} -gt 0 ]; then
               TOTAL_PUSHED=$((TOTAL_PUSHED + ${#BATCH_FILES[@]}))
               echo ""
@@ -774,37 +750,30 @@ jobs:
             fi
           }
 
-          # ============================================
-          # MAIN INCREMENTAL PUSH LOGIC
-          # ============================================
-
           echo ""
           echo "=========================================="
           echo "Starting incremental push process..."
           echo "=========================================="
 
-          # First, sync with remote
           echo "Syncing with remote repository..."
           git fetch origin "$BRANCH"
           git reset --hard origin/"$BRANCH"
 
-          # Create videos directory and copy files
           mkdir -p videos
           cp -r "$BACKUP_DIR"/* videos/
 
-          # Generate list of files to push (sorted by size, smallest first)
           echo "Analyzing files to push..."
           ALL_FILES=()
 
-          # First add README files (small)
+          # Add README files first (small)
           while IFS= read -r -d '' FILE; do
             ALL_FILES+=("$FILE")
           done < <(find videos -name "README.md" -print0 2>/dev/null)
 
-          # Then add zip parts sorted by name (for ordered upload)
+          # FIX: Updated glob to match .7z split parts (.7z.001, .7z.002 ...) and single .7z files
           while IFS= read -r -d '' FILE; do
             ALL_FILES+=("$FILE")
-          done < <(find videos -type f \( -name "*.z[0-9]*" -o -name "*.zip" -o -name "*.mp4" -o -name "*.mp3" -o -name "*.m4a" \) -print0 2>/dev/null | sort -z)
+          done < <(find videos -type f \( -name "*.7z" -o -name "*.7z.[0-9]*" -o -name "*.mp4" -o -name "*.mp3" -o -name "*.m4a" \) -print0 2>/dev/null | sort -z)
 
           TOTAL_FILES=${#ALL_FILES[@]}
           echo "Found $TOTAL_FILES files to push"
@@ -815,7 +784,6 @@ jobs:
             exit 0
           fi
 
-          # Calculate total size
           TOTAL_SIZE=0
           for F in "${ALL_FILES[@]}"; do
             if [ -f "$F" ]; then
@@ -827,7 +795,6 @@ jobs:
           echo "Total size: ${TOTAL_SIZE_MB}MB"
           echo ""
 
-          # Decide push strategy based on total size
           if [ $TOTAL_SIZE_MB -lt 100 ]; then
             echo "Small upload - pushing all at once..."
 
@@ -865,10 +832,8 @@ jobs:
             echo "Large upload (${TOTAL_SIZE_MB}MB) - using incremental batch push..."
             echo ""
 
-            # Push files in batches
             push_batch "${ALL_FILES[@]}"
 
-            # Final push for master README
             echo ""
             echo "Pushing master README..."
             git fetch origin "$BRANCH" --quiet 2>/dev/null || true
