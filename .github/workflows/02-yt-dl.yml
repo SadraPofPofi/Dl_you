@@ -187,39 +187,52 @@ jobs:
 
             if [ "$QUALITY" = "audio" ]; then
               COMMON_FLAGS="--extract-audio --audio-format mp3 --audio-quality 0 --output ${TMP_DIR}/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
-            else
+            elif [ "$QUALITY" = "best" ]; then
               COMMON_FLAGS="--merge-output-format mp4 --format-sort res,+codec:vp9.1,+size --output ${TMP_DIR}/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
+            else
+              COMMON_FLAGS="--merge-output-format mp4 --output ${TMP_DIR}/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
             fi
 
             case $METHOD in
               1)
+                # web client + deno JS solver + remote EJS components (best quality, needs challenge solving)
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
                   --extractor-args "youtube:player_client=web" \
                   --js-runtimes deno \
+                  --remote-components ejs:github \
                   --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
                   --add-header "Accept-Language:en-US,en;q=0.9" \
                   "$URL"
                 ;;
               2)
+                # web client + deno + remote EJS via NPM fallback
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
-                  --extractor-args "youtube:player_client=tv_embedded" \
+                  --extractor-args "youtube:player_client=web" \
+                  --js-runtimes deno \
+                  --remote-components ejs:npm \
+                  --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
+                  --add-header "Accept-Language:en-US,en;q=0.9" \
                   "$URL"
                 ;;
               3)
+                # web+mweb+android_vr combined + deno + remote EJS
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
-                  --extractor-args "youtube:player_client=android_vr" \
+                  --extractor-args "youtube:player_client=web,mweb,android_vr" \
+                  --js-runtimes deno \
+                  --remote-components ejs:github \
                   "$URL"
                 ;;
               4)
+                # mweb client via proxy
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
@@ -228,23 +241,26 @@ jobs:
                   "$URL"
                 ;;
               5)
+                # android_vr client via proxy
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
-                  --extractor-args "youtube:player_client=android" \
-                  --user-agent "Mozilla/5.0 (Linux; Android 12; SM-S906N Build/QP1A.190711.020) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36" \
+                  --extractor-args "youtube:player_client=android_vr" \
                   "$URL"
                 ;;
               6)
+                # web client no-proxy + deno + remote EJS
                 yt-dlp \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
                   --extractor-args "youtube:player_client=web" \
                   --js-runtimes deno \
+                  --remote-components ejs:github \
                   "$URL"
                 ;;
               7)
+                # mweb no-proxy
                 yt-dlp \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
@@ -252,12 +268,13 @@ jobs:
                   "$URL"
                 ;;
               8)
+                # android client last resort (limited to low quality without PO token — only used if all else fails)
                 yt-dlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
                   $COMMON_FLAGS \
-                  --extractor-args "youtube:player_client=web,mweb,android_vr" \
-                  --js-runtimes deno \
+                  --extractor-args "youtube:player_client=android" \
+                  --user-agent "Mozilla/5.0 (Linux; Android 12; SM-S906N Build/QP1A.190711.020) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36" \
                   "$URL"
                 ;;
             esac
@@ -301,7 +318,7 @@ jobs:
             mkdir -p "$TMP_DIR"
 
             echo "Checking available formats..."
-            yt-dlp -F "$URL" || echo "Could not list formats (will proceed with download)"
+            yt-dlp -F --proxy "socks5://127.0.0.1:1080" --js-runtimes deno --remote-components ejs:github "$URL" || echo "Could not list formats (will proceed with download)"
             echo ""
 
             DOWNLOAD_SUCCESS=false
@@ -610,8 +627,45 @@ jobs:
           echo "Total files to push: $BACKUP_FILE_COUNT"
 
           if [ "$BACKUP_FILE_COUNT" -eq 0 ]; then
-            echo "ERROR: No files in backup directory!"
-            exit 1
+            echo "WARNING: No files in backup directory — all downloads may have failed."
+            echo "Ensuring videos/ folder exists in repository with a master README..."
+
+            git fetch origin "$BRANCH"
+            git reset --hard origin/"$BRANCH"
+
+            mkdir -p videos
+
+            if [ ! -f "videos/README.md" ]; then
+              {
+                echo "# DOWNLOADED VIDEOS LIST :"
+                echo ""
+                echo "----"
+                echo ""
+                echo "> No videos downloaded yet."
+              } > videos/README.md
+              git add videos/README.md
+              if ! git diff --cached --quiet; then
+                git commit -m "[AVASAM] Initialize videos folder [skip ci]"
+                PUSH_RETRY=0
+                while [ $PUSH_RETRY -lt 5 ]; do
+                  PUSH_RETRY=$((PUSH_RETRY + 1))
+                  if timeout 60 git push origin HEAD:"$BRANCH"; then
+                    echo "videos/ folder initialized and pushed."
+                    break
+                  else
+                    echo "Push failed, retry $PUSH_RETRY/5..."
+                    sleep 3
+                  fi
+                done
+              else
+                echo "videos/README.md already exists, nothing to push."
+              fi
+            else
+              echo "videos/ folder already exists in repository."
+            fi
+
+            echo "No video files to push. Exiting."
+            exit 0
           fi
 
           urlencode() {
