@@ -19,6 +19,7 @@ on:
           - 1080
           - 720
           - 480
+          - 360
           - audio
       password:
         description: '🔒 Password for zip files (optional)'
@@ -181,10 +182,13 @@ jobs:
             "480")
               FORMAT="bestvideo[height=480]+bestaudio/bestvideo[height<=480]+bestaudio/bestvideo[height=480]*+bestaudio*/bestvideo[height<=480]*+bestaudio*"
               ;;
+            "360")
+              FORMAT="bestvideo[height=360]+bestaudio/bestvideo[height<=360]+bestaudio/bestvideo[height=360]*+bestaudio*/bestvideo[height<=360]*+bestaudio*"
+              ;;
             *)
               FORMAT="bestvideo+bestaudio/bestvideo*+bestaudio*/best"
               ;;
-          esac
+           esac
 
           download_video() {
             local METHOD=$1
